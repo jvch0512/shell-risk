@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# shell-risk: security linter for shell scripts. Pure Bash, no dependencies.
+set -u
+export LC_ALL=C
+
+usage() {
+  echo "usage: shell-risk PATH [--tsv] [--fail-on medium|high|critical]" >&2
+  echo "Exit: 0 ok, 1 findings at or above --fail-on, 2 bad input." >&2
+  exit 2
+}
+
+rank() {
+  case $1 in
+    critical) echo 0 ;; high) echo 1 ;; medium) echo 2 ;; low) echo 3 ;; *) echo 4 ;;
+  esac
+}
+
+FINDINGS=()
+
+add() { # sev rule file line msg
+  FINDINGS+=("$(rank "$1")"$'\t'"$3"$'\t'"$4"$'\t'"$2"$'\t'"$1"$'\t'"$5")
+}
+
+RE_PIPE_SH='(curl|wget)[^|]*\|[[:space:]]*(sudo[[:space:]]+)?(ba|z|da|k)?sh([[:space:]]|$|;)'
+RE_EVAL='(^|[;&|[:space:]])eval[[:space:]]+.*(\$|`)'
+RE_CHMOD777='chmod[[:space:]]+(-[A-Za-z]+[[:space:]]+)*(0?777|[ugo]*a?\+rwx|[ugoa]*o\+w)([[:space:]]|$)'
+RE_RMVAR='rm[[:space:]]+(-[A-Za-z-]+[[:space:]]+)*"?\$\{?[A-Za-z_][A-Za-z0-9_]*\}?(/|"|[[:space:]]|$)'
+RE_RMFLAGS='rm[[:space:]]+-[A-Za-z]*[rR]'
+RE_TMP='>>?[[:space:]]*"?/tmp/[A-Za-z0-9_.-]+'
+RE_CURLK='curl[^|;&]*[[:space:]](-[A-Za-z]*k[A-Za-z]*|--insecure)([[:space:]]|$)'
+RE_WGETK='wget[^|;&]*--no-check-certificate'
+RE_SECRET='^[[:space:]]*(export[[:space:]]+|declare[[:space:]]+(-x[[:space:]]+)?)?[A-Za-z0-9_]*(PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY|PRIVATE_KEY)[A-Za-z0-9_]*=["'"'"']?[^$"'"'"'[:space:]\(]'
+RE_SUDOS='\|[[:space:]]*sudo[[:space:]]+(-[A-Za-z]*S|--stdin)'
+RE_SETUID='chmod[[:space:]]+(-[A-Za-z]+[[:space:]]+)*([24-7][0-7]{3}|[ugoa]*\+s)([[:space:]]|$)'
+RE_SHC='(^|[[:space:];&|])(ba|da|z|k)?sh[[:space:]]+-c[[:space:]]+["'"'"']?\$'
+RE_RMROOT='rm[[:space:]]+(-[A-Za-z-]+[[:space:]]+)*/([[:space:]]*(\*)?[[:space:]]*($|;|&|\|))'
+RE_SETFLAGS='^[[:space:]]*set[[:space:]]+(-[A-Za-z]*[eu]|-o[[:space:]]+(errexit|nounset|pipefail))'
+
+scan_file() { # path label
+  local path=$1 label=$2 n=0 line t first="" has_set=0
+  [ -r "$path" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
+    line=${line%$'\r'}
+    t=${line#"${line%%[![:space:]]*}"}
+    if [ "$n" = 1 ]; then first=$t; fi
+    [ -z "$t" ] && continue
+    [[ $t == \#* ]] && continue
+    [[ $t =~ $RE_SETFLAGS ]] && has_set=1
+    if [[ $t =~ $RE_PIPE_SH ]]; then
+      add high SHL001 "$label" $n "a download is piped into a shell: the script runs whatever the server returns"
+    fi
+    if [[ $t =~ $RE_EVAL ]]; then
+      add high SHL002 "$label" $n "eval on expanded data: input becomes code"
+    fi
+    if [[ $t =~ $RE_CHMOD777 ]]; then
+      add medium SHL003 "$label" $n "world-writable permissions"
+    fi
+    if [[ $t =~ $RE_RMVAR && $t =~ $RE_RMFLAGS && $t != *':?'* ]]; then
+      add high SHL004 "$label" $n "rm -rf on a variable with no \${VAR:?} guard: an empty value deletes the wrong tree"
+    fi
+    if [[ $t =~ $RE_RMROOT && $t =~ $RE_RMFLAGS ]] || [[ $t == *--no-preserve-root* ]]; then
+      add critical SHL012 "$label" $n "rm on the filesystem root"
+    fi
+    if [[ $t =~ $RE_TMP && $t != *mktemp* && $t != *'$$'* ]]; then
+      add medium SHL005 "$label" $n "fixed file name in /tmp: use mktemp, another user can plant a symlink"
+    fi
+    if [[ $t =~ $RE_CURLK || $t =~ $RE_WGETK ]]; then
+      add medium SHL006 "$label" $n "certificate verification is turned off"
+    fi
+    if [[ $t =~ $RE_SECRET ]]; then
+      add high SHL007 "$label" $n "a secret is written into the script as a literal value"
+    fi
+    if [[ $t =~ $RE_SUDOS ]]; then
+      add high SHL008 "$label" $n "a password is piped into sudo -S"
+    fi
+    if [[ $t =~ $RE_SETUID ]]; then
+      add high SHL009 "$label" $n "setuid or setgid bit set"
+    fi
+    if [[ $t =~ $RE_SHC ]]; then
+      add medium SHL010 "$label" $n "a shell runs a variable as a command string"
+    fi
+  done < "$path"
+  if [[ $first =~ ^#!.*(bash|/sh|env[[:space:]]+(bash|sh))([[:space:]]|$) ]] && [ "$has_set" = 0 ]; then
+    add low SHL011 "$label" 0 "no set -e, set -u or set -o pipefail: errors pass silently"
+  fi
+}
+
+is_shell() { # path
+  local p=$1 h
+  case $p in *.sh|*.bash) return 0 ;; esac
+  h=$(head -c 200 "$p" 2>/dev/null | head -n 1 | tr -d '\0')
+  [[ $h =~ ^#!.*(^|[/[:space:]])(ba|da|z|k)?sh([[:space:]]|$) ]]
+}
+
+main() {
+  local path="" tsv=0 fail_on="" nfiles=0
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --tsv) tsv=1 ;;
+      --fail-on)
+        shift
+        [ $# -gt 0 ] || usage
+        case $1 in medium|high|critical) fail_on=$1 ;; *) usage ;; esac ;;
+      -*) usage ;;
+      *) [ -z "$path" ] || usage; path=$1 ;;
+    esac
+    shift
+  done
+  [ -n "$path" ] || usage
+  if [ ! -e "$path" ]; then
+    echo "error: no such file or directory: $path" >&2
+    exit 2
+  fi
+  if [ -d "$path" ]; then
+    local base=${path%/} f
+    [ -n "$base" ] || base=/
+    while IFS= read -r -d '' f; do
+      if is_shell "$f"; then
+        nfiles=$((nfiles + 1))
+        scan_file "$f" "${f#"$base"/}"
+      fi
+    done < <(find "$base" -name .git -prune -o -type f -print0 | sort -z)
+  else
+    nfiles=1
+    scan_file "$path" "$(basename -- "$path")"
+  fi
+
+  local sorted=() total=${#FINDINGS[@]}
+  if [ "$total" -gt 0 ]; then
+    mapfile -t sorted < <(printf '%s\n' "${FINDINGS[@]}" | sort -t $'\t' -k1,1n -k2,2 -k3,3n -k4,4)
+  fi
+  local head="$nfiles files, $total findings"
+  if [ $tsv = 1 ]; then echo "# $head"; else echo "$head"; fi
+  local row r file ln rule sev msg where up
+  for row in "${sorted[@]+"${sorted[@]}"}"; do
+    IFS=$'\t' read -r r file ln rule sev msg <<<"$row"
+    where=$file
+    [ "$ln" -gt 0 ] && where="$file:$ln"
+    if [ $tsv = 1 ]; then
+      printf '%s\t%s\t%s\t%s\n' "$sev" "$rule" "$where" "$msg"
+    else
+      up=${sev^^}
+      printf '%-8s %s %s\n         %s\n' "$up" "$rule" "$where" "$msg"
+    fi
+  done
+  if [ -n "$fail_on" ]; then
+    local floor
+    floor=$(rank "$fail_on")
+    for row in "${sorted[@]+"${sorted[@]}"}"; do
+      r=${row%%$'\t'*}
+      [ "$r" -le "$floor" ] && exit 1
+    done
+  fi
+  exit 0
+}
+
+main "$@"

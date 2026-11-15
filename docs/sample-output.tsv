@@ -1,0 +1,14 @@
+# 3 files, 13 findings
+critical	SHL012	tools/wipe:3	rm on the filesystem root
+high	SHL007	deploy.sh:3	a secret is written into the script as a literal value
+high	SHL007	deploy.sh:4	a secret is written into the script as a literal value
+high	SHL001	deploy.sh:5	a download is piped into a shell: the script runs whatever the server returns
+high	SHL008	deploy.sh:7	a password is piped into sudo -S
+high	SHL004	deploy.sh:8	rm -rf on a variable with no ${VAR:?} guard: an empty value deletes the wrong tree
+high	SHL002	deploy.sh:10	eval on expanded data: input becomes code
+high	SHL009	deploy.sh:14	setuid or setgid bit set
+medium	SHL006	deploy.sh:6	certificate verification is turned off
+medium	SHL005	deploy.sh:11	fixed file name in /tmp: use mktemp, another user can plant a symlink
+medium	SHL003	deploy.sh:13	world-writable permissions
+medium	SHL010	deploy.sh:15	a shell runs a variable as a command string
+low	SHL011	deploy.sh	no set -e, set -u or set -o pipefail: errors pass silently
