@@ -24,7 +24,8 @@ add() { # sev rule file line msg
 RE_PIPE_SH='(curl|wget)[^|]*\|[[:space:]]*(sudo[[:space:]]+)?(ba|z|da|k)?sh([[:space:]]|$|;)'
 RE_EVAL='(^|[;&|[:space:]])eval[[:space:]]+.*(\$|`)'
 RE_CHMOD777='chmod[[:space:]]+(-[A-Za-z]+[[:space:]]+)*(0?777|[ugo]*a?\+rwx|[ugoa]*o\+w)([[:space:]]|$)'
-RE_RMVAR='rm[[:space:]]+(-[A-Za-z-]+[[:space:]]+)*"?\$\{?[A-Za-z_][A-Za-z0-9_]*\}?(/|"|[[:space:]]|$)'
+# Only a variable followed by a slash can become "/" or "/x" when empty. A bare `rm -rf "$DIR"` just fails on an empty value.
+RE_RMVAR='rm[[:space:]]+(-[A-Za-z-]+[[:space:]]+)*"?\$\{?[A-Za-z_][A-Za-z0-9_]*\}?"?/'
 RE_RMFLAGS='rm[[:space:]]+-[A-Za-z]*[rR]'
 RE_TMP='>>?[[:space:]]*"?/tmp/[A-Za-z0-9_.-]+'
 RE_CURLK='curl[^|;&]*[[:space:]](-[A-Za-z]*k[A-Za-z]*|--insecure)([[:space:]]|$)'
